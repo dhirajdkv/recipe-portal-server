@@ -84,95 +84,152 @@ export const getConsolidatedList = async (req, res) => {
       });
     });
     
-    // Step 2: Group ingredients by unit for faster processing
-    const ingredientsByUnit = {};
-    allIngredients.forEach(ingredient => {
-      if (!ingredientsByUnit[ingredient.normalizedUnit]) {
-        ingredientsByUnit[ingredient.normalizedUnit] = [];
-      }
-      ingredientsByUnit[ingredient.normalizedUnit].push(ingredient);
-    });
-    
-    // Step 3: Process each unit group separately
+    // Step 2: Use fuzzball to find similar ingredient names
     const similarityThreshold = 0.75;
-    const consolidatedIngredients = [];
-    const volumeUnitsGroups = new Map();
+    const processedIndices = new Set();
+    const ingredientGroups = [];
     
-    Object.values(ingredientsByUnit).forEach(unitGroup => {
-      const processedIndices = new Set();
+    for (let i = 0; i < allIngredients.length; i++) {
+      if (processedIndices.has(i)) continue;
       
-      for (let i = 0; i < unitGroup.length; i++) {
-        if (processedIndices.has(i)) continue;
+      const currentIngredient = allIngredients[i];
+      const similarIngredients = [currentIngredient];
+      processedIndices.add(i);
+      
+      // Find all similar ingredients
+      for (let j = i + 1; j < allIngredients.length; j++) {
+        if (processedIndices.has(j)) continue;
         
-        const currentIngredient = unitGroup[i];
-        const similarIngredients = [currentIngredient];
-        processedIndices.add(i);
+        const otherIngredient = allIngredients[j];
+        const similarityScore = partial_ratio(
+          currentIngredient.normalizedName,
+          otherIngredient.normalizedName
+        ) / 100;
         
-        // Find all similar ingredients in the same unit group
-        for (let j = i + 1; j < unitGroup.length; j++) {
-          if (processedIndices.has(j)) continue;
+        if (similarityScore >= similarityThreshold) {
+          similarIngredients.push(otherIngredient);
+          processedIndices.add(j);
+        }
+      }
+      
+      ingredientGroups.push({
+        name: currentIngredient.name,
+        ingredients: similarIngredients
+      });
+    }
+    
+    // Step 3: Process each ingredient group
+    const consolidatedIngredients = [];
+    
+    ingredientGroups.forEach(group => {
+      const volumeIngredients = [];
+      const nonVolumeIngredients = [];
+      
+      group.ingredients.forEach(ingredient => {
+        const unitKey = ingredient.normalizedUnit;
+        if (isVolumeUnit(unitKey)) {
+          volumeIngredients.push(ingredient);
+        } else {
+          nonVolumeIngredients.push(ingredient);
+        }
+      });
+      
+      if (volumeIngredients.length > 0) {
+        // Group by original unit for debugging
+        const ingredientsByOriginalUnit = {};
+        volumeIngredients.forEach(ingredient => {
+          const unitKey = ingredient.unit.toLowerCase().trim();
+          if (!ingredientsByOriginalUnit[unitKey]) {
+            ingredientsByOriginalUnit[unitKey] = [];
+          }
+          ingredientsByOriginalUnit[unitKey].push(ingredient);
+        });
+        
+        // for debugging
+        console.log(`Original units for ${group.name}:`, Object.keys(ingredientsByOriginalUnit));
+        
+        const hasCups = Object.keys(ingredientsByOriginalUnit).some(unit => 
+          unit === 'cup' || unit === 'cups'
+        );
+        const hasTbsp = Object.keys(ingredientsByOriginalUnit).some(unit => 
+          unit === 'tbsp' || unit === 'tablespoon' || unit === 'tablespoons'
+        );
+        
+        if (hasCups && hasTbsp) {
+          const cupIngredients = volumeIngredients.filter(ing => 
+            ing.unit.toLowerCase().trim() === 'cup' || 
+            ing.unit.toLowerCase().trim() === 'cups'
+          );
           
-          const otherIngredient = unitGroup[j];
-          const similarityScore = partial_ratio(
-            currentIngredient.normalizedName,
-            otherIngredient.normalizedName
-          ) / 100;
+          let totalCups = 0;
+          cupIngredients.forEach(ing => {
+            totalCups += ing.quantity;
+          });
           
-          if (similarityScore >= similarityThreshold) {
-            similarIngredients.push(otherIngredient);
-            processedIndices.add(j);
+          if (totalCups > 0) {
+            consolidatedIngredients.push({
+              name: group.name,
+              quantity: totalCups,
+              unit: 'cup'
+            });
+          }
+          
+          const tbspIngredients = volumeIngredients.filter(ing => 
+            ing.unit.toLowerCase().trim() === 'tbsp' || 
+            ing.unit.toLowerCase().trim() === 'tablespoon' || 
+            ing.unit.toLowerCase().trim() === 'tablespoons'
+          );
+          
+          let totalTbsp = 0;
+          tbspIngredients.forEach(ing => {
+            totalTbsp += ing.quantity;
+          });
+          
+          if (totalTbsp > 0) {
+            consolidatedIngredients.push({
+              name: `+ ${group.name}`,
+              quantity: totalTbsp,
+              unit: 'tbsp'
+            });
+          }
+        } else {
+          // Use the normalizeVolumeUnits function for other cases
+          const normalizedUnits = normalizeVolumeUnits(volumeIngredients);
+          
+          if (normalizedUnits.length > 0) {
+            const primaryUnit = normalizedUnits.find(u => u.isPrimary);
+            consolidatedIngredients.push({
+              name: group.name,
+              quantity: primaryUnit.quantity,
+              unit: primaryUnit.unit
+            });
+            
+            normalizedUnits.filter(u => !u.isPrimary).forEach(additionalUnit => {
+              consolidatedIngredients.push({
+                name: `+ ${group.name}`,
+                quantity: additionalUnit.quantity,
+                unit: additionalUnit.unit
+              });
+            });
           }
         }
-        
+      }
+      
+      if (nonVolumeIngredients.length > 0) {
         const consolidated = {
-          name: currentIngredient.name,
-          unit: currentIngredient.unit,
+          name: group.name,
+          unit: nonVolumeIngredients[0].unit,
           quantity: 0
         };
         
-        similarIngredients.forEach(ing => {
+        nonVolumeIngredients.forEach(ing => {
           consolidated.quantity += ing.quantity;
         });
         
-        const unitKey = consolidated.unit.toLowerCase().trim();
-        if (isVolumeUnit(unitKey)) {
-          const nameKey = consolidated.name.toLowerCase().trim();
-          if (!volumeUnitsGroups.has(nameKey)) {
-            volumeUnitsGroups.set(nameKey, {
-              name: consolidated.name,
-              ingredients: []
-            });
-          }
-          volumeUnitsGroups.get(nameKey).ingredients.push(consolidated);
-        } else {
-          consolidatedIngredients.push(consolidated);
-        }
+        consolidatedIngredients.push(consolidated);
       }
     });
     
-    // Step 4: Process volume units and normalize them
-    volumeUnitsGroups.forEach(group => {
-      const normalizedUnits = normalizeVolumeUnits(group.ingredients);
-      
-      if (normalizedUnits.length > 0) {
-        const primaryUnit = normalizedUnits.find(u => u.isPrimary);
-        consolidatedIngredients.push({
-          name: group.name,
-          quantity: primaryUnit.quantity,
-          unit: primaryUnit.unit
-        });
-        
-        normalizedUnits.filter(u => !u.isPrimary).forEach(additionalUnit => {
-          consolidatedIngredients.push({
-            name: `+ ${group.name}`,
-            quantity: additionalUnit.quantity,
-            unit: additionalUnit.unit
-          });
-        });
-      }
-    });
-    
-    // Sort final list by name
     const consolidatedList = consolidatedIngredients.sort((a, b) => 
       a.name.toLowerCase().localeCompare(b.name.toLowerCase())
     );
