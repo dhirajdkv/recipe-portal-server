@@ -1,6 +1,6 @@
 import Recipe from '../models/Recipe.js';
-import { normalizeIngredientName } from '../utils/ingredientSubstitutions.js';
 import { generateRecipeIngredients } from '../utils/geminiAI.js';
+import { partial_ratio } from 'fuzzball';
 
 // Search recipes by name
 export const searchRecipes = async (req, res) => {
@@ -11,11 +11,8 @@ export const searchRecipes = async (req, res) => {
       return res.status(400).json({ message: 'Search query is required' });
     }
     
-    // Creating a case-insensitive regex pattern
     const searchPattern = new RegExp(query, 'i');
     
-    // Finding recipes matching the pattern, limit to 5 results
-    // Only return recipe name and ID, explicitly exclude other fields
     const recipes = await Recipe.find({ name: searchPattern }, { name: 1, _id: 1 })
       .limit(5);
     
@@ -38,7 +35,6 @@ export const getRecipeById = async (req, res) => {
       return res.status(400).json({ message: 'Recipe ID is required' });
     }
     
-    // Find the recipe by ID and return all details
     const recipe = await Recipe.findById(id)
       .select('name ingredients createdAt updatedAt');
     
@@ -65,7 +61,6 @@ export const getConsolidatedList = async (req, res) => {
       return res.status(400).json({ message: 'Valid array of recipe IDs is required' });
     }
     
-    // Fetch all recipes with the given IDs
     const recipes = await Recipe.find({
       _id: { $in: recipeIds }
     }).select('ingredients');
@@ -74,36 +69,78 @@ export const getConsolidatedList = async (req, res) => {
       return res.status(404).json({ message: 'No recipes found with the provided IDs' });
     }
     
-    // Create a map to store consolidated ingredients
-    const consolidatedMap = new Map();
-    
-    // Process each recipe's ingredients
+    // Step 1: Collect all ingredients from all recipes
+    const allIngredients = [];
     recipes.forEach(recipe => {
       recipe.ingredients.forEach(ingredient => {
-        const normalizedName = normalizeIngredientName(ingredient.name);
-        // Normalize unit to lowercase and trim
-        const normalizedUnit = ingredient.unit.toLowerCase().trim();
-        const key = `${normalizedName}_${normalizedUnit}`;
-        
-        if (consolidatedMap.has(key)) {
-          const existing = consolidatedMap.get(key);
-          existing.quantity += ingredient.quantity || 0;
-        } else {
-          consolidatedMap.set(key, {
-            name: ingredient.name,  // keeping original name for display
-            quantity: ingredient.quantity || 0,
-            unit: ingredient.unit,
-            normalizedName  // adding normalized name for debugging
-          });
-        }
+        allIngredients.push({
+          name: ingredient.name,
+          normalizedName: ingredient.name.toLowerCase().trim(),
+          quantity: ingredient.quantity || 0,
+          unit: ingredient.unit,
+          normalizedUnit: ingredient.unit.toLowerCase().trim()
+        });
       });
     });
     
-    // Convert map to array and sort by normalized name
-    const consolidatedList = Array.from(consolidatedMap.values())
-      .sort((a, b) => a.normalizedName.localeCompare(b.normalizedName))
-      // Remove the normalizedName from the final output
-      .map(({ normalizedName, ...rest }) => rest);
+    // Step 2: Group ingredients by unit for faster processing
+    const ingredientsByUnit = {};
+    allIngredients.forEach(ingredient => {
+      if (!ingredientsByUnit[ingredient.normalizedUnit]) {
+        ingredientsByUnit[ingredient.normalizedUnit] = [];
+      }
+      ingredientsByUnit[ingredient.normalizedUnit].push(ingredient);
+    });
+    
+    // Step 3: Process each unit group separately
+    const similarityThreshold = 0.6;
+    const consolidatedIngredients = [];
+    
+    Object.values(ingredientsByUnit).forEach(unitGroup => {
+      const processedIndices = new Set();
+      
+      for (let i = 0; i < unitGroup.length; i++) {
+        if (processedIndices.has(i)) continue;
+        
+        const currentIngredient = unitGroup[i];
+        const similarIngredients = [currentIngredient];
+        processedIndices.add(i);
+        
+        // Find all similar ingredients in the same unit group
+        for (let j = i + 1; j < unitGroup.length; j++) {
+          if (processedIndices.has(j)) continue;
+          
+          const otherIngredient = unitGroup[j];
+          const similarityScore = partial_ratio(
+            currentIngredient.normalizedName,
+            otherIngredient.normalizedName
+          ) / 100;
+          
+          if (similarityScore >= similarityThreshold) {
+            similarIngredients.push(otherIngredient);
+            processedIndices.add(j);
+          }
+        }
+        
+        // Merge similar ingredients
+        const consolidated = {
+          name: currentIngredient.name, // Use the first ingredient's name
+          unit: currentIngredient.unit,
+          quantity: 0
+        };
+        
+        similarIngredients.forEach(ing => {
+          consolidated.quantity += ing.quantity;
+        });
+        
+        consolidatedIngredients.push(consolidated);
+      }
+    });
+    
+    // Sort final list by name
+    const consolidatedList = consolidatedIngredients.sort((a, b) => 
+      a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+    );
     
     return res.status(200).json({
       count: consolidatedList.length,
@@ -127,22 +164,18 @@ export const generateRecipe = async (req, res) => {
       return res.status(400).json({ message: 'Recipe name is required' });
     }
 
-    // Check if recipe with this name already exists
     const existingRecipe = await Recipe.findOne({ name });
     if (existingRecipe) {
       return res.status(400).json({ message: 'Recipe with this name already exists' });
     }
 
-    // Generate ingredients using Gemini AI
     const ingredients = await generateRecipeIngredients(name);
 
-    // Create new recipe
     const newRecipe = new Recipe({
       name,
       ingredients
     });
 
-    // Save to database
     await newRecipe.save();
 
     return res.status(201).json(newRecipe);
