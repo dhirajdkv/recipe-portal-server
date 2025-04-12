@@ -47,6 +47,9 @@ export const isVolumeUnit = (unit) => {
 export const normalizeVolumeUnits = (ingredients) => {
   if (ingredients.length === 0) return ingredients;
   
+  // Log the input ingredients for debugging
+  console.log('Normalizing ingredients:', ingredients.map(i => `${i.name}: ${i.quantity} ${i.unit}`));
+  
   let totalInTsp = 0;
   
   ingredients.forEach(ingredient => {
@@ -62,6 +65,8 @@ export const normalizeVolumeUnits = (ingredients) => {
       totalInTsp += ingredient.quantity;
     }
   });
+  
+  console.log(`Total in tsp: ${totalInTsp}`);
   
   // cup > tbsp > tsp
   const result = [];
@@ -98,5 +103,6 @@ export const normalizeVolumeUnits = (ingredients) => {
     }
   }
   
+  console.log('Normalized result:', result);
   return result;
 }; 
