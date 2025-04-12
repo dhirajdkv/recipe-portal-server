@@ -1,6 +1,7 @@
 import Recipe from '../models/Recipe.js';
 import { generateRecipeIngredients } from '../utils/geminiAI.js';
 import { partial_ratio } from 'fuzzball';
+import { isVolumeUnit, normalizeVolumeUnits } from '../utils/unitConversion.js';
 
 // Search recipes by name
 export const searchRecipes = async (req, res) => {
@@ -93,8 +94,9 @@ export const getConsolidatedList = async (req, res) => {
     });
     
     // Step 3: Process each unit group separately
-    const similarityThreshold = 0.6;
+    const similarityThreshold = 0.75;
     const consolidatedIngredients = [];
+    const volumeUnitsGroups = new Map();
     
     Object.values(ingredientsByUnit).forEach(unitGroup => {
       const processedIndices = new Set();
@@ -122,9 +124,8 @@ export const getConsolidatedList = async (req, res) => {
           }
         }
         
-        // Merge similar ingredients
         const consolidated = {
-          name: currentIngredient.name, // Use the first ingredient's name
+          name: currentIngredient.name,
           unit: currentIngredient.unit,
           quantity: 0
         };
@@ -133,7 +134,41 @@ export const getConsolidatedList = async (req, res) => {
           consolidated.quantity += ing.quantity;
         });
         
-        consolidatedIngredients.push(consolidated);
+        const unitKey = consolidated.unit.toLowerCase().trim();
+        if (isVolumeUnit(unitKey)) {
+          const nameKey = consolidated.name.toLowerCase().trim();
+          if (!volumeUnitsGroups.has(nameKey)) {
+            volumeUnitsGroups.set(nameKey, {
+              name: consolidated.name,
+              ingredients: []
+            });
+          }
+          volumeUnitsGroups.get(nameKey).ingredients.push(consolidated);
+        } else {
+          consolidatedIngredients.push(consolidated);
+        }
+      }
+    });
+    
+    // Step 4: Process volume units and normalize them
+    volumeUnitsGroups.forEach(group => {
+      const normalizedUnits = normalizeVolumeUnits(group.ingredients);
+      
+      if (normalizedUnits.length > 0) {
+        const primaryUnit = normalizedUnits.find(u => u.isPrimary);
+        consolidatedIngredients.push({
+          name: group.name,
+          quantity: primaryUnit.quantity,
+          unit: primaryUnit.unit
+        });
+        
+        normalizedUnits.filter(u => !u.isPrimary).forEach(additionalUnit => {
+          consolidatedIngredients.push({
+            name: `+ ${group.name}`,
+            quantity: additionalUnit.quantity,
+            unit: additionalUnit.unit
+          });
+        });
       }
     });
     
